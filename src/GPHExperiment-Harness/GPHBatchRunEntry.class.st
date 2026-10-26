@@ -14,7 +14,11 @@ Class {
 		'endedAt',
 		'anomaly',
 		'rateLimited',
-		'error'
+		'error',
+		'memoryBeforeLaunchBytes',
+		'modelReleased',
+		'memoryAfterReleaseBytes',
+		'gcMs'
 	],
 	#category : 'GPHExperiment-Harness-Run',
 	#package : 'GPHExperiment-Harness',
@@ -31,7 +35,7 @@ GPHBatchRunEntry class >> index: anInteger config: aRunConfig [
 
 { #category : 'converting' }
 GPHBatchRunEntry >> asDictionary [
-	"The entry as written in batch-status.json; only the public fields of the configuration, never the token."
+	"The entry as written in batch-status.json; only the public fields of the configuration, never the token. The memory keys are null until measured (memory in old-space bytes in use, see GPHRunBatch class>>#usedOldSpaceBytes)."
 
 	| configDictionary |
 	configDictionary := config asDictionary.
@@ -49,6 +53,10 @@ GPHBatchRunEntry >> asDictionary [
 		  at: 'anomaly' put: anomaly;
 		  at: 'rateLimited' put: rateLimited;
 		  at: 'error' put: error;
+		  at: 'memoryBeforeLaunchBytes' put: memoryBeforeLaunchBytes;
+		  at: 'modelReleased' put: modelReleased;
+		  at: 'memoryAfterReleaseBytes' put: memoryAfterReleaseBytes;
+		  at: 'gcMs' put: gcMs;
 		  yourself
 ]
 
@@ -68,6 +76,12 @@ GPHBatchRunEntry >> endedAt [
 GPHBatchRunEntry >> error [
 
 	^ error
+]
+
+{ #category : 'accessing' }
+GPHBatchRunEntry >> gcMs [
+
+	^ gcMs
 ]
 
 { #category : 'accessing' }
@@ -116,6 +130,25 @@ GPHBatchRunEntry >> markSkipped [
 	state := #skipped
 ]
 
+{ #category : 'accessing' }
+GPHBatchRunEntry >> memoryAfterReleaseBytes [
+
+	^ memoryAfterReleaseBytes
+]
+
+{ #category : 'accessing' }
+GPHBatchRunEntry >> memoryBeforeLaunchBytes [
+
+	^ memoryBeforeLaunchBytes
+]
+
+{ #category : 'accessing' }
+GPHBatchRunEntry >> modelReleased [
+	"nil until the batch attempted the release, then a Boolean."
+
+	^ modelReleased
+]
+
 { #category : 'recording' }
 GPHBatchRunEntry >> noteError: aString [
 	"Record an error observed by the batch itself (not by the run)."
@@ -124,6 +157,22 @@ GPHBatchRunEntry >> noteError: aString [
 		         at: 'class' put: GPHRunBatch name;
 		         at: 'message' put: aString;
 		         yourself
+]
+
+{ #category : 'recording' }
+GPHBatchRunEntry >> recordMemoryBeforeLaunch: aNumberOfBytes [
+	"Old-space bytes in use read just before the run is launched."
+
+	memoryBeforeLaunchBytes := aNumberOfBytes
+]
+
+{ #category : 'recording' }
+GPHBatchRunEntry >> recordModelReleased: aBoolean memoryAfterRelease: aNumberOfBytes gcMs: aNumberOfMilliseconds [
+	"Outcome of the release of the run model and of the full garbage collection that follows it."
+
+	modelReleased := aBoolean.
+	memoryAfterReleaseBytes := aNumberOfBytes.
+	gcMs := aNumberOfMilliseconds
 ]
 
 { #category : 'recording' }

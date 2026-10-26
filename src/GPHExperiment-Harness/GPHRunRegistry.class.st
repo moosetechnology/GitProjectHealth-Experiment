@@ -149,6 +149,24 @@ GPHRunRegistry >> register: aHandle as: anId [
 			handles at: anId put: aHandle ]
 ]
 
+{ #category : 'memory' }
+GPHRunRegistry >> releaseFinishedModels [
+	"Release the models of every run that no live process can still use: finished runs, and runs whose process is terminated or absent (see GPHRunHandle>>#releaseModelIfNotRunning). Runs whose run or watchdog process is alive are not touched. Answer the sorted ids of the runs released by this call."
+
+	| candidates |
+	candidates := mutex critical: [ handles associations ].
+	^ (candidates
+		   select: [ :each | each value releaseModelIfNotRunning ]
+		   thenCollect: [ :each | each key ]) sorted
+]
+
+{ #category : 'memory' }
+GPHRunRegistry >> releaseModelOf: aRunId [
+	"Release the in-memory model of a finished run (its exports stay on disk); answer whether it is released. A run that is not finished is left untouched (false)."
+
+	^ (self handleAt: aRunId) releaseModel
+]
+
 { #category : 'querying' }
 GPHRunRegistry >> runIds [
 

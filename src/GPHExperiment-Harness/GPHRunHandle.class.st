@@ -65,6 +65,16 @@ GPHRunHandle >> expireAfter: aDuration [
 			, ' ms exceeded'
 ]
 
+{ #category : 'testing' }
+GPHRunHandle >> hasLiveProcess [
+	"Whether the run process or the watchdog (which finalizes a timed-out run) is still alive."
+
+	^ {
+		  process.
+		  watchdog } anySatisfy: [ :each |
+		  each notNil and: [ each isTerminated not ] ]
+]
+
 { #category : 'initialization' }
 GPHRunHandle >> initialize [
 
@@ -98,6 +108,25 @@ GPHRunHandle >> outputDirectory [
 GPHRunHandle >> process [
 
 	^ process
+]
+
+{ #category : 'memory' }
+GPHRunHandle >> releaseModel [
+	"Release the in-memory model of a finished run; answer whether it is released (see GPHRunner>>#releaseModel)."
+
+	^ runner releaseModel
+]
+
+{ #category : 'memory' }
+GPHRunHandle >> releaseModelIfNotRunning [
+	"Release the model of a run that no live process can still use: a finished run, or a run whose process is terminated or absent although it never reached a terminal state (e.g. its process was terminated outside the harness). A pending run (nothing imported yet) or one being finalized is left alone, as is any run whose run or watchdog process is alive. Answer true only when this call released the model."
+
+	self hasLiveProcess ifTrue: [ ^ false ].
+	runner modelReleased ifTrue: [ ^ false ].
+	runner isFinished ifTrue: [ ^ runner releaseModel ].
+	(#( #pending #finalizing ) includes: runner state) ifTrue: [ ^ false ].
+	runner forceReleaseModel.
+	^ true
 ]
 
 { #category : 'running' }

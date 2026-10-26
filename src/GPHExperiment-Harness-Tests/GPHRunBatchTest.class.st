@@ -10,7 +10,8 @@ Class {
 		'stepsBlock',
 		'factoryBlock',
 		'events',
-		'batch'
+		'batch',
+		'memoryLog'
 	],
 	#category : 'GPHExperiment-Harness-Tests-Run',
 	#package : 'GPHExperiment-Harness-Tests',
@@ -30,13 +31,17 @@ GPHRunBatchTest >> assertStartFailsAndLaunchesNothing [
 
 { #category : 'helpers' }
 GPHRunBatchTest >> batchOf: aCollectionOfRunIds [
+	"Never a real full garbage collection in tests: the collector and the memory probe are injected and only log their calls in memoryLog. The probe answers 1000 times the number of probe calls so far (1000, 2000, ...)."
 
 	batch := GPHRunBatch new
 		         batchId: 'gph-batch-test';
 		         registry: registry;
 		         clock: GPHClock new;
 		         redactor: self tokenProvider;
-		         configs: (aCollectionOfRunIds collect: [ :runId |
+		         garbageCollector: [ memoryLog add: 'gc' ];
+		         memoryProbe: [ self probeMemory ];
+		         configs:
+			         (aCollectionOfRunIds collect: [ :runId |
 					          self configNamed: runId ]);
 		         yourself.
 	^ batch
@@ -81,6 +86,14 @@ GPHRunBatchTest >> newRunnerOn: aRunConfig [
 ]
 
 { #category : 'helpers' }
+GPHRunBatchTest >> probeMemory [
+	"Deterministic memory probe: log the call and answer 1000 times the number of probe calls so far."
+
+	memoryLog add: 'probe'.
+	^ (memoryLog count: [ :each | each = 'probe' ]) * 1000
+]
+
+{ #category : 'helpers' }
 GPHRunBatchTest >> recordingStepsOf: aRunner milliseconds: aNumber [
 	"One measured step recording its start and end in events, then the export."
 
@@ -104,7 +117,9 @@ GPHRunBatchTest >> setUp [
 	super setUp.
 	fileSystem := FileSystem memory.
 	events := OrderedCollection new.
-	stepsBlock := [ :runner | self recordingStepsOf: runner milliseconds: 50 ].
+	memoryLog := OrderedCollection new.
+	stepsBlock := [ :runner |
+	              self recordingStepsOf: runner milliseconds: 50 ].
 	factoryBlock := [ :config | self newRunnerOn: config ].
 	registry := GPHRunRegistry new
 		            outputRoot: fileSystem root / 'out';
@@ -135,6 +150,32 @@ GPHRunBatchTest >> tearDown [
 				handle watchdog ifNotNil: [ :watchdog | watchdog terminate ].
 				handle process ifNotNil: [ :process | process terminate ] ].
 	super tearDown
+]
+
+{ #category : 'tests' }
+GPHRunBatchTest >> testBatchStatusFileContainsTheMemoryKeys [
+	"batch-status.json (in the in-memory output root) reports, for each run, the release outcome, the probed memory before launch and after release, and the collection duration. The probe answers 1000, 2000, ... (before run 1, after run 1, before run 2, ...)."
+
+	| status |
+	(self batchOf: #( 'run-1' 'run-2' )) start.
+
+	self waitForBatch.
+
+	status := GPHJsonFile read: self statusFile.
+	self assert: (status at: 'runs') size equals: 2.
+	(status at: 'runs') withIndexDo: [ :run :index |
+			#( 'memoryBeforeLaunchBytes' 'modelReleased' 'memoryAfterReleaseBytes'
+			   'gcMs' ) do: [ :key |
+				self assert: (run includesKey: key) description: key , ' missing' ].
+			self assert: (run at: 'modelReleased') equals: true.
+			self
+				assert: (run at: 'memoryBeforeLaunchBytes')
+				equals: index * 2 - 1 * 1000.
+			self
+				assert: (run at: 'memoryAfterReleaseBytes')
+				equals: index * 2 * 1000.
+			self assert: (run at: 'gcMs') isInteger.
+			self assert: (run at: 'gcMs') >= 0 ]
 ]
 
 { #category : 'tests' }
@@ -208,6 +249,41 @@ GPHRunBatchTest >> testInvalidConfigLaunchesNothing [
 ]
 
 { #category : 'tests' }
+GPHRunBatchTest >> testModelIsReleasedAfterEachRunBeforeTheNextLaunch [
+	"After each run the batch releases the run model, runs the (injected) garbage collector once, then reads the (injected) memory probe; all of this happens before the memory read and the launch of the next run."
+
+	factoryBlock := [ :config |
+		                memoryLog add: 'launch:' , config runId.
+		                self newRunnerOn: config ].
+	(self batchOf: #( 'run-1' 'run-2' )) start.
+
+	self waitForBatch.
+
+	self
+		assert: memoryLog asArray
+		equals:
+			#( 'probe' 'launch:run-1' 'gc' 'probe' 'probe' 'launch:run-2'
+			   'gc' 'probe' ).
+	self assert: (memoryLog count: [ :each | each = 'gc' ]) equals: 2.
+	self assert: (registry handleAt: 'run-1') runner modelReleased.
+	self assert: (registry handleAt: 'run-2') runner modelReleased.
+	self
+		assert: (batch runEntries collect: [ :entry | entry modelReleased ])
+		equals: #( true true ).
+	self
+		assert:
+		(batch runEntries collect: [ :entry | entry memoryBeforeLaunchBytes ])
+		equals: #( 1000 3000 ).
+	self
+		assert:
+		(batch runEntries collect: [ :entry | entry memoryAfterReleaseBytes ])
+		equals: #( 2000 4000 ).
+	batch runEntries do: [ :entry |
+			self assert: entry gcMs isInteger.
+			self assert: entry gcMs >= 0 ]
+]
+
+{ #category : 'tests' }
 GPHRunBatchTest >> testNoTokenInBatchStatus [
 
 	| contents |
@@ -220,6 +296,31 @@ GPHRunBatchTest >> testNoTokenInBatchStatus [
 	self deny: (contents includesSubstring: 'SECRET-BATCH').
 	self deny: (contents includesSubstring: 'token').
 	self assert: (contents includesSubstring: '[REDACTED]')
+]
+
+{ #category : 'tests' }
+GPHRunBatchTest >> testRunEntryDictionaryAppendsTheMemoryKeys [
+	"The 13 original keys keep their order and come first; the 4 memory keys are appended, filled from the injected probe after a run."
+
+	| dictionary |
+	(self batchOf: #( 'run-1' )) start.
+
+	self waitForBatch.
+
+	dictionary := batch runEntries first asDictionary.
+	self
+		assert: dictionary keys asArray
+		equals:
+			#( 'index' 'runId' 'repo' 'mode' 'clone' 'since' 'until' 'state'
+			   'launchedAt' 'endedAt' 'anomaly' 'rateLimited' 'error' 'memoryBeforeLaunchBytes'
+			   'modelReleased' 'memoryAfterReleaseBytes'
+			   'gcMs' ).
+	self assert: (dictionary at: 'state') equals: #done.
+	self assert: (dictionary at: 'memoryBeforeLaunchBytes') equals: 1000.
+	self assert: (dictionary at: 'modelReleased') equals: true.
+	self assert: (dictionary at: 'memoryAfterReleaseBytes') equals: 2000.
+	self assert: (dictionary at: 'gcMs') isInteger.
+	self assert: (dictionary at: 'gcMs') >= 0
 ]
 
 { #category : 'tests' }

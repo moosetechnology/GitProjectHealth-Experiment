@@ -92,6 +92,20 @@ GPHCompareJob >> outputDirectory: anObject [
 	outputDirectory := anObject
 ]
 
+{ #category : 'memory' }
+GPHCompareJob >> releaseModel [
+	"A comparison reads exported files and keeps no model in memory."
+
+	^ false
+]
+
+{ #category : 'memory' }
+GPHCompareJob >> releaseModelIfNotRunning [
+	"A comparison reads exported files and keeps no model in memory."
+
+	^ false
+]
+
 { #category : 'running' }
 GPHCompareJob >> runComparison [
 

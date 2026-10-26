@@ -44,7 +44,9 @@ Class {
 		'errorMessage',
 		'finalizationErrors',
 		'statusMutex',
-		'stateAtExport'
+		'stateAtExport',
+		'modelReleased',
+		'releasedFallbacks'
 	],
 	#category : 'GPHExperiment-Harness-Run',
 	#package : 'GPHExperiment-Harness',
@@ -289,7 +291,7 @@ GPHRunner >> failWith: anError [
 GPHRunner >> fallbacks [
 
 	^ importers
-		  ifNil: [ #(  ) ]
+		  ifNil: [ releasedFallbacks ifNil: [ #(  ) ] ]
 		  ifNotNil: [ :importerSet | importerSet fallbacks ]
 ]
 
@@ -316,6 +318,28 @@ GPHRunner >> finalizeReporting: anExportState thenPublish: aTerminalState [
 	self changeState: #finalizing.
 	self finalize.
 	self changeState: aTerminalState
+]
+
+{ #category : 'memory' }
+GPHRunner >> forceReleaseModel [
+	"Drop the imported data whatever the state. Only for a run that can no longer progress (see GPHRunHandle>>#releaseModelIfNotRunning); otherwise use #releaseModel.
+	Dropped: importers (importer set: GLH model, API, local and mixed importers), project (GLHProject), localRepository (the opened clone), windowCommits and windowAuthors (model entities), pullRequests and resolutions (keyed by pull request entities), windowShas, branchesBySha and headResolvable (sha-indexed data only read by the export).
+	Kept: config, mode, steps, recorder (API calls), timings, gateCheck, state, dates, errors, cloneHeadSha/cloneHeadDate (scalars), and the fallbacks, copied to releasedFallbacks so that the status keeps reporting them."
+
+	statusMutex critical: [
+			modelReleased == true ifFalse: [
+				releasedFallbacks := self fallbacks asArray ].
+			importers := nil.
+			project := nil.
+			localRepository := nil.
+			windowCommits := #(  ).
+			windowShas := Set new.
+			windowAuthors := #(  ).
+			pullRequests := #(  ).
+			resolutions := IdentityDictionary new.
+			branchesBySha := Dictionary new.
+			headResolvable := Dictionary new.
+			modelReleased := true ]
 ]
 
 { #category : 'steps' }
@@ -429,6 +453,7 @@ GPHRunner >> initialize [
 	headResolvable := Dictionary new.
 	finalizationErrors := OrderedDictionary new.
 	measuredPhaseStarted := false.
+	modelReleased := false.
 	state := #pending
 ]
 
@@ -494,6 +519,13 @@ GPHRunner >> mode [
 GPHRunner >> model [
 
 	^ importers ifNotNil: [ :importerSet | importerSet model ]
+]
+
+{ #category : 'accessing' }
+GPHRunner >> modelReleased [
+	"Whether the imported data was dropped (#releaseModel)."
+
+	^ modelReleased ifNil: [ false ]
 ]
 
 { #category : 'accessing' }
@@ -581,6 +613,15 @@ GPHRunner >> recorder [
 GPHRunner >> recorder: anObject [
 
 	recorder := anObject
+]
+
+{ #category : 'memory' }
+GPHRunner >> releaseModel [
+	"Drop every reference to imported data once the run is finished (its export is written by then), so that the model can be garbage collected. Idempotent. Answer true when the model is released, false (and do nothing) while the run is not in a terminal state."
+
+	self isFinished ifFalse: [ ^ false ].
+	self forceReleaseModel.
+	^ true
 ]
 
 { #category : 'accessing' }

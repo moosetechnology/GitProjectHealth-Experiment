@@ -42,7 +42,9 @@ Class {
 		'comparisonEntries',
 		'errorMessage',
 		'mutex',
-		'stopSignal'
+		'stopSignal',
+		'garbageCollector',
+		'memoryProbe'
 	],
 	#classInstVars : [
 		'batches'
@@ -115,6 +117,15 @@ GPHRunBatch class >> statusOf: aBatchId in: anOutputRoot [
 	file exists ifFalse: [
 		GPHUnknownRunError signal: 'Unknown batch: ' , aBatchId asString ].
 	^ GPHJsonFile read: file
+]
+
+{ #category : 'memory' }
+GPHRunBatch class >> usedOldSpaceBytes [
+	"Bytes in use in the old space: its size (VM parameter 1) minus its free bytes (VM parameter 54). memoryEnd (VM parameter 3) is the end address of the heap, not an amount of used memory."
+
+	| vm |
+	vm := Smalltalk vm.
+	^ (vm parameterAt: 1) - (vm parameterAt: 54)
 ]
 
 { #category : 'accessing' }
@@ -254,6 +265,21 @@ GPHRunBatch >> finishWith: aState [
 			self writeStatus ] ]
 ]
 
+{ #category : 'accessing' }
+GPHRunBatch >> garbageCollector [
+	"A block run after each run, once its model is released; a full garbage collection by default."
+
+	^ garbageCollector ifNil: [
+		  garbageCollector := [ Smalltalk garbageCollect ] ]
+]
+
+{ #category : 'accessing' }
+GPHRunBatch >> garbageCollector: aBlock [
+	"Injection point, mainly for tests (e.g. an empty block to avoid full garbage collections)."
+
+	garbageCollector := aBlock
+]
+
 { #category : 'initialization' }
 GPHRunBatch >> initialize [
 
@@ -294,15 +320,31 @@ GPHRunBatch >> isStopRequested [
 
 { #category : 'running' }
 GPHRunBatch >> launch: anEntry [
-	"Launch under the mutex, so that a concurrent #stop either prevents the launch or sees the run as running and stops it."
+	"Launch under the mutex, so that a concurrent #stop either prevents the launch or sees the run as running and stops it. The memory in use is read just before the launch."
 
 	mutex critical: [
-		stopRequested ifTrue: [ ^ self ].
-		self registry launch: anEntry config.
-		currentIndex := anEntry index.
-		currentRunId := anEntry runId.
-		anEntry markLaunchedAt: clock now.
-		self writeStatus ]
+			stopRequested ifTrue: [ ^ self ].
+			anEntry recordMemoryBeforeLaunch: self memoryProbe value.
+			self registry launch: anEntry config.
+			currentIndex := anEntry index.
+			currentRunId := anEntry runId.
+			anEntry markLaunchedAt: clock now.
+			self writeStatus ]
+]
+
+{ #category : 'accessing' }
+GPHRunBatch >> memoryProbe [
+	"A block answering the memory in use, in bytes; old-space bytes in use by default (GPHRunBatch class>>#usedOldSpaceBytes)."
+
+	^ memoryProbe ifNil: [
+		  memoryProbe := [ self class usedOldSpaceBytes ] ]
+]
+
+{ #category : 'accessing' }
+GPHRunBatch >> memoryProbe: aBlock [
+	"Injection point, mainly for tests."
+
+	memoryProbe := aBlock
 ]
 
 { #category : 'accessing' }
@@ -423,6 +465,24 @@ GPHRunBatch >> registry: aRunRegistry [
 ]
 
 { #category : 'running' }
+GPHRunBatch >> releaseModelOf: anEntry [
+	"Release the in-memory model of the run (refused by the registry while the run is not terminal), run the garbage collector, and record the outcome, the memory in use after the collection and the collection duration. A failure of the release is recorded as not released and never fails the batch."
+
+	| released gcMilliseconds memoryAfter |
+	released := [ self registry releaseModelOf: anEntry runId ]
+		            on: Error
+		            do: [ :anError | anError return: false ].
+	gcMilliseconds := Time millisecondsToRun: self garbageCollector.
+	memoryAfter := self memoryProbe value.
+	mutex critical: [
+			anEntry
+				recordModelReleased: released
+				memoryAfterRelease: memoryAfter
+				gcMs: gcMilliseconds.
+			self writeStatus ]
+]
+
+{ #category : 'running' }
 GPHRunBatch >> runAllEntries [
 	"Strictly sequential: a run is launched only once the previous one is terminal. A failed run is recorded, never relaunched."
 
@@ -459,11 +519,14 @@ GPHRunBatch >> runEntries [
 
 { #category : 'running' }
 GPHRunBatch >> runEntry: anEntry [
+	"Launch the run, wait for it (its export is written once it is terminal), record its outcome, then release its model and collect garbage, outside any measured step and before the pause and the next launch."
 
 	self launch: anEntry.
 	anEntry isRunning ifFalse: [ ^ self ].
-	(self awaitRunOf: anEntry) ifFalse: [ ^ self stopOverdueRun: anEntry ].
-	self recordOutcomeOf: anEntry
+	(self awaitRunOf: anEntry)
+		ifTrue: [ self recordOutcomeOf: anEntry ]
+		ifFalse: [ self stopOverdueRun: anEntry ].
+	self releaseModelOf: anEntry
 ]
 
 { #category : 'running' }
